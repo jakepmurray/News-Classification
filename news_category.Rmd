@@ -1,0 +1,890 @@
+---
+title: "Media Classification: Helping Users Navigate the Labyrinth of Online News"
+author: 
+- 'Jake Murray'
+- 'Suhaib Abdurahman'
+date: 'December 15, 2019'
+output:
+  bookdown::html_document2
+bibliography: bibliography.bib
+csl: apa_numeric.csl
+classoption: twocolumn
+---
+
+
+<style>
+  .col1 {
+    columns: 1 400px;         /* number of columns and width in pixels*/
+    -webkit-columns: 1 400px; /* chrome, safari */
+    -moz-columns: 1 400px;    /* firefox */
+  }
+  .col2 {
+    columns: 2 200px;         /* number of columns and width in pixels*/
+    -webkit-columns: 2 200px; /* chrome, safari */
+    -moz-columns: 2 200px;    /* firefox */
+  }
+  .col3 {
+    columns: 3 100px;
+    -webkit-columns: 3 100px;
+    -moz-columns: 3 100px;
+  }
+</style>
+
+```{r,include=F}
+pacman::p_load(readr,tidyverse,readxl,kableExtra,bookdown,captioner, bundesligR, stringr,glmnet, RColorBrewer, wordcloud, imager, jsonlite, tm, SnowballC, caret, ranger, keras, BiocManager,scales, nnet, xgboost, e1071)
+knitr::opts_chunk$set(echo=F,warning=F,include=F,eval=T)
+```
+
+
+
+```{r}
+gss <- read_xls('gss.xls')
+gss <- na.omit(gss)
+summary(gss)
+
+num_internet <- sum(gss$`Main source of information about events in the news`=='The internet')
+num_papers <- sum(gss$`Main source of information about events in the news`=='Newspapers')
+num_tv <- sum(gss$`Main source of information about events in the news`=='Tv')
+num_na <- sum(gss$`Main source of information about events in the news`=='Not applicable')
+
+num_internet/nrow(gss)
+num_papers/nrow(gss)
+num_tv/nrow(gss)
+
+pct_int <- num_internet/(nrow(gss)-num_na)*100
+pct_papers <- num_papers/(nrow(gss)-num_na)*100
+pct_tv <- num_tv/(nrow(gss)-num_na)*100
+
+#'Statistic'='Pertentage of Respondants'
+consumption_table <- data.frame(Internet=pct_int, Newspaper=pct_papers, Television=pct_tv) %>%
+  round(1) %>%
+  mutate(Other = 100 - Internet - Newspaper - Television)
+
+pct_int_more <- (pct_int-pct_papers-pct_tv)/(pct_papers+pct_tv)*100
+```
+
+
+<div class="col2">
+
+# Abstract
+
+In the modern age of social media, partisan politics, and abundance of false information, internet users must excersise great mindfulness in online media consumption. In this paper, we address this issue by building models to categorically classify online news based on their headlines. We hope that these techinques may be implemented by individuals, organizations, or policy makers to notice trends in how media influence affects individuals or populations, as well as the the genre of news that these individuals or populations tend to consume. Although users cannot practice enough vigilance in ensuring that they do not fall victim to misinformation, our model can assist in efficiently finding relevant and truthful information. We train models using logistic regression, boosting, random forests, and neural networks. The best selected model can classify by category with 49% accuracy^[Measured using misclassification error.], 34% better than the baseline model.
+
+## Motivation 
+
+The United States is becoming increasingly dependent on the internet for news. In the 2018 General Social Survey (GSS), 45.9% percent of respondants report the internet as their primary source for news, 7.6% more than than television and newspaper combined. These data are shown in Table \@ref(tab:tab1).
+
+```{r tab1,include=T}
+kable(consumption_table,format='pandoc',caption="\\label{tab:tab1}Percentage of Media Consumption by Medium")
+```
+
+This result is consistent with the increasing reliance on the internet for news over the past 10 years of GSS data, as shown in Figure \@ref(fig:fig2), and it represents a dramatic change in the way Americans access information. The digital media company eMarketer reports that 2019 is the first year in which the rate of adult media consumption via the internet has surpassed the rate of media consumption via television^[This is not consistent across sources. The Pew Research Center[@pew] reports that TV is still the most popular form of media consumption for adults] [@emarketer_2019].
+
+```{r}
+gss_full <- read_xls('gss.xls') %>%
+  na.omit() %>%
+  filter(`Gss year for this respondent`>=2008)
+
+gss_full_by_year <- gss_full %>%
+  group_by(`Gss year for this respondent`) %>%
+  summarise(full_num_internet = sum(`Main source of information about events in the news`=='The internet'),
+            full_num_papers = sum(`Main source of information about events in the news`=='Newspapers'),
+            full_num_tv = sum(`Main source of information about events in the news`=='Tv'),
+            full_num_na = sum(`Main source of information about events in the news`=='Not applicable'),
+            full_num_thisyear = sum(`Gss year for this respondent`==`Gss year for this respondent`)) %>%
+  mutate(Internet = 100*full_num_internet/(full_num_thisyear-full_num_na)) %>%
+  mutate(Newspaper = 100*full_num_papers/(full_num_thisyear-full_num_na)) %>%
+  mutate(TV = 100*full_num_tv/(full_num_thisyear-full_num_na)) %>%
+  mutate(full_num_response = full_num_thisyear-full_num_na) %>%
+  rename(Year = `Gss year for this respondent`) %>%
+  gather("Medium", "Percentage of Respondents",c(Internet,Newspaper,TV)) %>%
+  select(Year, Medium, `Percentage of Respondents`)
+```
+
+
+```{r fig2,include=T,fig.cap="Media Consumption by Year"}
+ggplot(data = gss_full_by_year, aes(x=Year,y=`Percentage of Respondents`,colour=Medium))+
+  geom_point()+
+  geom_line() +
+  scale_x_discrete(limits=c(2008,2010,2012,2014,2016,2018)) +
+  theme_bw()
+```
+
+
+These trends are among those who seek out the news; we might, however, expect the breadth of online media influence to far surpass these reported percentages. According to the DataReportal Digital 2019 Report [@kemp2019], 95% of Americans use the internet, and 70% are active at least monthly on social media. As social media increasingly becomes a medium for advertising, this supermajority of the US population is constantly exposed to the media's digital influence. While this may not inherently be negative, social media has been consumed by an epidemic of misinformation. A common example of this was false and targeted advertising in the 2016 Presidential election. 
+
+DataReportal[@kemp2017] estimates that at the onset of 2017, there were 214 million active Facebook users in the United States. Among these users, Yonder[@misinfo] reports that there were 76.5 million engagements with deftly targeted polarizing adverstiments before the Novermber 2016 election. This targeted advertizing in turn impacts the websites are directed towards and the forms of news they see.
+
+However, this pheneomena of polarization extends beyond even politically motivated advertisements into all of digital news reporting, with what has become known as clickbait. Indeed, Reis et. all [@reis] find that.
+
+> Interestingly, our results suggest that a headline has more chance
+to be successful if the sentiment expressed in its text is extreme, towards the positive or the negative side. Results suggest that neutral headlines are usually less attractive.
+
+'Clickbait' is a method of headlining that strategically withholds information from the title of an article to make the article seem more enticing, born out necessity due to the plethora of information available on the web. While clickbait can be as atrocious as titles such as "Is your boyfriend cheating on you?...He is, if he does these five things" [@bhattarai_2018], many are much more subtle, such as "'Shark Tank' star Barbara Corcoran, AKA NY's Queen of Real Estate, reveals a brilliant tip for paying off mortage" [@cbait1]. This form of digitial media is also not convincingly negative by design, but it is inexplicably linked with extreme headlines and political polarization.
+
+This incentive for the extremes in news headlining results in a distillation of the news which is actually relevant to an individual. Our model can be applied to several very relevant features in the world. Firstly, we can use it to compare the consumption of media by genre before and after the advent of clickbait and widespread polarizing media. Is the distriubtion over the news that people consume the same or different? It can also be used at an individual scale to determine the distrubition of media consumption over categories for an individual. This can be used to ensure one is accessing the information that is relevant to them, and that nothing is left to the wayside. It can also be applied to different subpopulations, to how the distribution of media consumed by subpolution varies. Further discussion of this will be included in Section 4.2
+
+## The Data
+
+We are using a dataset of roughly 200,000 HuffPost headlines from 2012-2018, labeled by category category[@misra_2018]. We find this dataset to be appropriate for several reasons. As stated above, we are particularly interested in classifying internet news headlines, as well as evaluating for bias. HuffPost is a major provider of internet news. Additionally, in a 2017 Gallup and Knight Foundations poll [@knight], Americans voted HuffPost to be the fourth most biased media source of 16 popular sources, such as The New York Times, NPR, and Fox News. HuffPost also reports on a very wide variety of topics, giving the opportunity to train a somewhat robust model for classification.
+
+The data contains 200,853 observations. Each observation is stored as a tuple with the label, headline, author, link, and date. There are 100 different authors and 41 different categories. A list of the original labels and the number of observations given each label is provided in Table \@ref(tab:tab2).
+
+```{r}
+# news_data <- stream_in(file("News_Category_Dataset_v2.json"), verbose = F)
+# news_data <- news_data %>% mutate_at(c('category', 'authors'), as.factor)
+# 
+# nrow(news_data)
+# length(summary(news_data$authors))
+# 
+# categories <- data.frame(summary(news_data$category))%>%select(Number = 1, everything())
+
+load("preprocessed.RData")
+```
+
+
+```{r tab2, include=T}
+kable(categories,format='pandoc',caption="\\label{tab:tab2}Original Labels") %>%
+  kable_styling(latex_options='scale_down',bootstrap_options = 'condensed')
+```
+
+
+# EDA
+
+In this section, we will first discuss ways in which we are modifying the collected data to be appropriate for this study, and then we will look for relationships in the data to motivate our analysis. 
+
+## Preprocessing
+
+*A. Investigating Missing Data*
+
+We first look to see what data is missing. We provide a summary of the missing data in Table \@ref(tab:tab5)
+
+```{r tab5, include=T}
+pre_data_missing <- pre_data %>% mutate_all(c(function(val) na_if(x=val,y=""))) #empty strings to NA
+missing_data <- data.frame('Num missing'=sapply(pre_data_missing, function(y) sum(length(which(is.na(y))))))
+
+kable(missing_data, format='pandoc',caption="\\label{tab:tab5}Missing Data")
+```
+
+We then used the links included in the data set to check the articles with missing authors or short description and found that it is not the data set missing this information but that certain articles simply do not publish a short description or the author's name. We therefore decided to create new indicator variables regarding missing authors and descriptions. This will be discussed more in detail in Section 2.1 B.
+
+*B. Changing Labels*
+
+Notice from Table \@ref(tab:tab2) that several categories seem to be very similar. For this reason, we combine labels using a mapping shown in the appendix and end up with 26 unique labels. We show the distrubtion over modified categories in Figure \@ref(fig:fig5), and a table of the new labels is provided below.
+
+
+```{r tab4, include=T}
+kable(sort(unique(pre_data$category)),format='pandoc',caption="\\label{tab:tab4}Original Labels") %>%
+  kable_styling(latex_options='scale_down',bootstrap_options = 'condensed')
+```
+
+
+
+```{r fig5, include=T, fig.cap='Pct of Observations Per Modified Category'}
+pct.category <- pre_data %>% 
+  group_by(category) %>% 
+  summarise(pct = n()/nrow(pre_data)*100) #use as relation to accuracy
+ggplot(data=pct.category,aes(x = category, y = pct, fill=category)) + geom_bar(stat = "identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'none')+ylab('Percentage')
+```
+
+
+```{r}
+
+max_pct <- pct.category %>% filter(pct == max(pct))
+```
+
+```{r}
+#Headlines:
+
+# headlines <- pre_data$headline
+# h <- iconv(headlines, "latin1", "ASCII", sub="") # Clean non standard symbols
+# 
+# mycorpus_h <- VCorpus(VectorSource(h))
+# mycorpus_clean_h <- tm_map(mycorpus_h, content_transformer(tolower))
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, removeWords, stopwords("english"))
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, removePunctuation)
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, removeNumbers)
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, stemDocument, lazy = TRUE)
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, stripWhitespace)
+# 
+# #Descriptions:
+# desc <- pre_data$short_description
+# d <- iconv(desc, "latin1", "ASCII", sub="") # Clean non standard symbols
+# 
+# mycorpus_d <- VCorpus(VectorSource(d))
+# mycorpus_clean_d <- tm_map(mycorpus_d, content_transformer(tolower))
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, removeWords, stopwords("english"))
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, removePunctuation)
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, removeNumbers)
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, stemDocument, lazy = TRUE)
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, stripWhitespace)
+
+# save(mycorpus_clean_h, mycorpus_clean_d, file = "clean_corpus.RData")
+load("clean_corpus.RData")
+```
+
+```{r}
+# #Merging categories -> 26 categories
+#
+# pre_data <- news_data
+# pre_data$category <- gsub("STYLE$", "STYLE & BEAUTY", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("PARENTS$", "PARENTING", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("CULTURE & ARTS$", "ARTS & CULTURE", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("ARTS$", "ARTS & CULTURE", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("TASTE$", "FOOD & DRINK", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("WORLDPOST$", "WORLD NEWS", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("THE WORLDPOST$", "WORLD NEWS", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("THE WORLD NEWS$", "WORLD NEWS", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("COLLEGE$", "EDUCATION", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("GREEN$", "ENVIRONMENT", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("WELLNESS$", "HEALTHY LIVING", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("WEDDINGS$", "MARRIAGE", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("DIVORCE$", "MARRIAGE", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("GOOD NEWS$", "WEIRD NEWS", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("MONEY$", "BUSINESS", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("BLACK VOICES$", "DIVERSITY", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("LATINO VOICES$", "DIVERSITY", pre_data$category) %>% as.factor
+# pre_data$category <- gsub("QUEER VOICES$", "DIVERSITY", pre_data$category) %>% as.factor
+# 
+# levels(pre_data$category)
+# summary(pre_data)
+# #sum(is.na(pre_data)) #No missing values!
+```
+
+```{r}
+# #Adding Missing Values:
+# #Lincoln 2.0?
+#
+# pre_data <- pre_data %>% mutate_all(funs(na_if(.,""))) #empty strings to NA
+# sapply(pre_data, function(y) sum(length(which(is.na(y)))))
+#
+# #Retrieve headlines:
+# na_headline <- pre_data %>% filter(is.na(headline))
+# pre_data <- pre_data %>% mutate(headline = replace(headline, link == na_headline$link[1], "Lincoln 2.0?"))
+# na_headline <- pre_data %>% filter(is.na(headline))
+# 
+# #delete articles without headline
+# pre_data <- pre_data %>% filter(!(link %in% na_headline$link))
+```
+
+
+```{r}
+#Headlines:
+
+# headlines <- pre_data$headline
+# h <- iconv(headlines, "latin1", "ASCII", sub="") # Clean non standard symbols
+# 
+# mycorpus_h <- VCorpus(VectorSource(h))
+# mycorpus_clean_h <- tm_map(mycorpus_h, content_transformer(tolower))
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, removeWords, stopwords("english"))
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, removePunctuation)
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, removeNumbers)
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, stemDocument, lazy = TRUE)
+# mycorpus_clean_h <- tm_map(mycorpus_clean_h, stripWhitespace)
+# 
+# #Descriptions:
+# desc <- pre_data$short_description
+# d <- iconv(desc, "latin1", "ASCII", sub="") # Clean non standard symbols
+# 
+# mycorpus_d <- VCorpus(VectorSource(d))
+# mycorpus_clean_d <- tm_map(mycorpus_d, content_transformer(tolower))
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, removeWords, stopwords("english"))
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, removePunctuation)
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, removeNumbers)
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, stemDocument, lazy = TRUE)
+# mycorpus_clean_d <- tm_map(mycorpus_clean_d, stripWhitespace)
+
+# save(mycorpus_clean_h, mycorpus_clean_d, file = "clean_corpus.RData")
+load("clean_corpus.RData")
+```
+
+For the headlines and descriptions, we separately first remove all non-english words, puncation, numbers, stem all of the words, and strip all white space except for single spaces, and save them each in their own corpus. We then remove words that do not appear in 99% of headlines and descriptions, respectively. Summaries of the document term matrices with term frequency weighting is provided in Table \@ref(tab:tab3).
+
+```{r}
+#Document Term Matrix
+load("dtms.RData")
+th_h <- .005 #threshold to remove sparse terms
+th_d <- .005
+# dtm_h <- DocumentTermMatrix( mycorpus_clean_h) ## library = collection of words for all documents
+# dtm_h #Extremely sparse
+ dtm_h.filter <- removeSparseTerms(dtm_h, 1 - th_h) # sparsity < .99
+# dim(as.matrix(dtm_h.filter))
+# 
+# dtm_d <- DocumentTermMatrix( mycorpus_clean_d ) ## library = collection of words for all documents
+# dtm_d #Extremely sparse
+ dtm_d.filter <- removeSparseTerms(dtm_d, 1 - th_d) # sparsity < .99
+# dim(as.matrix(dtm_h.filter))
+
+# save(dtm_d, dtm_h, file = "dtms.RData")
+ 
+ dtm_summaries = data.frame(Feature=c('Headline','Description'),
+                           `Number Entries`=c(35793801,79265674),
+                           `Pct Non-Sparse`=c(round(100*358839/35793801,3),round(100*872678/79265674,3)))
+```
+
+
+```{r tab3, include=T}
+kable(dtm_summaries,format='pandoc',caption="\\label{tab:tab3}Document Term Matrix Summaries")
+```
+
+After preparing the predictor words from text mining, we also prepare additional meta-information to include in our analysis. In total, we introduce several seven new variables in order to improve classification:
+
+1. Missing author indicator
+2. Missing description indicator
+3. Headline word count
+4. Description word count
+5. Average word length headline
+6. Average word length description
+7. Weekday published indicators
+
+```{r}
+# Word count: -> change to preporcessing
+word_count_headline <- rowSums(as.matrix(dtm_h.filter))
+word_count_desc <- rowSums(as.matrix(dtm_h.filter))
+
+# avg word legnth:
+word_length_desc <- nchar(colnames(dtm_h.filter)) #length of every word
+word_length_headline <- nchar(colnames(dtm_h.filter)) #length of every word
+word_matrix_desc <- as.matrix(dtm_h.filter)
+word_matrix_headline <- as.matrix(dtm_h.filter)
+
+avg_headline <- (word_matrix_headline %*% word_length_headline) / word_count_headline
+avg_headline <- ifelse(is.na(avg_headline), 0, avg_headline)
+avg_desc <- (word_matrix_desc %*% word_length_desc) / word_count_desc
+avg_desc <- ifelse(is.na(avg_desc), 0, avg_desc)
+
+#Other meta information
+missing_author <- ifelse(is.na(pre_data$authors), 1, 0)
+missing_desc <- ifelse(is.na(pre_data$short_description), 1, 0)
+weekdays <- as.factor(weekdays(as.Date(pre_data$date)))
+
+#Add to data frame
+post_data <- pre_data %>% mutate(missing_author = missing_author, missing_desc = missing_desc, weekdays = weekdays, avg_headline = avg_headline, avg_desc = avg_desc, word_count_headline = word_count_headline, word_count_desc = word_count_desc) %>% select(-link, -headline, -short_description, -date, -authors)
+```
+
+
+## Initial Insights 
+
+We provide several plots to see if any of our added predictors may be significant. First, we look at the distribution of publications per weekday in Figure \@ref(fig:fig3). We see that the distribution is roughly uniform.
+
+```{r fig3, include=T,fig.cap="Prop of Reviews Per Weekday"}
+#visualisation:
+ggplot(data=data.frame(weekdays),aes(x=weekdays,fill=weekdays))+
+  geom_bar()+
+  coord_polar() +
+  ylab('')
+```
+
+
+```{r}
+week_table <- as.data.frame(prop.table(table(pre_data$category, weekdays), 1))
+```
+
+We next explore the distribution of labels over weekdays, shown in Figure \@ref(fig:association). 
+
+```{r association, fig.height=8, fig.width=14, fig.cap='Association Plot',include=T}
+# Heatmap: Shows some difference in distribution of topics over weekdays -> might be useful predictor
+ggplot(week_table, aes(x = Var1, y = weekdays, fill = Freq)) + 
+  geom_tile() + 
+  scale_fill_gradient2(low = muted("darkred"), 
+                       mid = "white", 
+                       high = muted("midnightblue"), 
+                       midpoint = max(week_table$Freq)/2,
+                       space = "Lab",
+                       na.value = "grey50", 
+                       guide = "colourbar") +
+  theme(axis.text.x = element_text(angle=90, hjust = 1,vjust=1,size = 12,face = "bold"),
+        plot.title = element_text(size=20,face="bold"),
+        axis.text.y = element_text(size = 12,face = "bold")) + 
+  theme(legend.title=element_text(face="bold", size=14)) + 
+  scale_x_discrete(name="") +
+  scale_y_discrete(name="") +
+  labs(fill="Percentage") + # background colours are mapped according to the value column
+  geom_text(aes(label = round(Freq, 2))) # write the values
+
+# Add plots for other meta information?
+```
+
+
+We see that the strongest correlation is 0.27 between `SCIENCE` and Saturdays. The two weakest correlations are 0.03 between `FOOD & DRINK` and Sunday as well as `MARRIAGE` and Sunday. Generally speaking, there are quite some differences between classes and the respective most common publishing days. Some categories such as `ENVIRONMENT` and `SCIENCE` are much more frequently published on the weekends, while others such as `FOOD & DRINK` and `MARRIAGE` are significantly less frequent on the weekends. This indicates that the publishing date might be a good predictor for the categories.
+
+```{r}
+complete_data <- data.frame(post_data, as.matrix(dtm_h.filter), as.matrix(dtm_d.filter))
+```
+
+
+# Analyses
+
+For our analyses, we combine all the aforementioned variables and then randomly split the data into a training, validation, and testing set, following a 80/10/10 percent split.
+
+```{r}
+set.seed(1) # for the purpose of reporducibility, 80% test/train split
+N <- nrow(complete_data)
+test.index <- sample(N, 0.2*N)
+complete.train <- complete_data[-test.index, ]
+temp <- complete_data[test.index, ]
+
+N_val <- nrow(temp)
+valid.index <- sample(N_val, 0.5*N_val)
+complete.valid <-  temp[valid.index, ]
+complete.test <- temp[-valid.index, ]
+```
+
+
+```{r}
+# Transform data for different algorithms:
+y_train     <- complete.train$category
+y_test      <- complete.test$category
+y_valid_num <- complete.valid$category
+
+#Transform for Keras (numeric factor levels) -> use look up table:
+y_train_num <- as.numeric(complete.train$category) - 1 #go from 0 to 28
+y_test_num  <- as.numeric(complete.test$category) - 1
+y_valid_num <- as.numeric(complete.valid$category) - 1
+ 
+
+X <- sparse.model.matrix(category ~. , data=complete.train)[, -1] #train
+X_test <- sparse.model.matrix(category ~. , data=complete.test)[, -1] #test
+X_valid <- sparse.model.matrix(category ~. , data=complete.valid)[, -1] #validation
+
+p = dim(X)[2] #amount of features
+```
+
+We used three methods for our model building:
+
+ - Random forest
+ - Extreme gradient boosted random forest
+ - Neural Networks
+ - Multinomial logistic regression
+ 
+ We want some notion of knowing how well our classifiers our doing. Notice from Figure \@ref(fig:fig5) that the most popular category is `POLITICS`. At the very least, we would like our classifier to do better than the most trival case, predicting the most popular option every time. In our test data, 16% of the labels are `POLITICS`. Hence, we should expect our classifiers to perform significantly better than this. 
+
+```{r}
+#support functions: creats lists with top3 categories
+top3 <- function(x){
+  top <- data.frame(Top1 = names(tail(sort(x), 3)[3]), Top2 = names(tail(sort(x), 3)[2]), Top3 = names(tail(sort(x), 3)[1]), stringsAsFactors = F)
+}
+
+# support function: checks if true category is among top 3 most likely ones
+rowCheck <- function(x, y){
+  data <- data.frame(matrix(ncol = 1, nrow = NROW(x)))
+  colnames(data) <- paste0("Match")
+  for(i in 1:NROW(x)){
+    temp <- x[i] %in% y[i,]
+    data[i, 1] <- temp
+  }
+  return(data)
+}
+```
+
+## Random Forests
+
+*A. Model Description*
+
+We next will be analyzing: this data set using random forests. A random forest is an ensemble method for predicting classes based on the predictions of often hundreds of decision trees. In particular trees that are grown very deep to learn highly irregular patterns. These overfit their training sets, meaning they have low bias, but very high variance. Random forests are a way of averaging these multiple deep decision trees, trained on different parts of the same training set, with the goal of reducing the variance. This comes at the expense of a small increase in the bias and some loss of interpretability, but generally greatly boosts the performance in the final model providing realiable estimates of feature importance. 
+
+We run the model with a sufficiently large number of trees (200) and a standard number of variables at split point of $\sqrt{p}$, with p being the number of features. We built the random forest, using the `ranger` package, with all possible variables for induction, and 24 possible variables sampled at each try. We also calculate the importance of predictors, running it in a supervised mode. We used the `ranger` package for its speed advantages and advanced output options, such as variable importance. The top 20 most important variables can be seen in Table \@ref(tab:top20).
+
+```{r}
+#No tuning:
+set.seed(2)
+load("RF_headline.RData")
+#fit.rf.ranger <- ranger(category ~. , complete.train, num.trees = 200, importance="impurity", probability = TRUE, mtry = sqrt(p)) # no plotting fit.rf.ranger
+#save(fit.rf.ranger, file="RF_headline.RData")
+
+imp <- fit.rf.ranger$variable.importance
+top_20 <- data.frame(Importance = imp[order(imp, decreasing = T)][1:20])
+```
+
+
+```{r top20,include=T}
+kable(top_20,format = 'pandoc',caption="\\label{tab:top20}20 Most Important Features")
+```
+
+*B. Results*
+
+We trained this model on the training dataest and used the testing data to achieve a test accuracy of approximately 40%. This is considered a decent performance when compared to a baseline accuracy of 16%.
+
+```{r}
+# check accuracy and ranking (top 3) accuracy (is the predicted category in the top 3)
+# Accuracies, single vs multilable
+
+load("prob_rf.RData")
+
+# prob_rf <- predict(fit.rf.ranger, complete.test[,-1], type = "response")$predictions
+# pred_rf <- colnames(prob_rf)[apply(prob_rf,1,which.max)] # most likely class!
+# rank_rf <- bind_rows(apply(prob_rf, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_match_rf <- rowCheck(complete.test$category, rank_rf)
+# 
+# mce_rf <- mean(pred_rf == complete.test$category) #40% accuracy
+# mce_rf_top3 <- mean(top3_match == TRUE) # 60% accuracy
+
+#save(mce_rf, mce_rf_top3, pred_rf, file = "prob_rf.RData")
+
+```
+
+The "Confusion Plot" in Figure \@ref(fig:conf1) shows an interesting relation: the distribution of predictions given a label. The vertical axis is the predicted labels, and the horizontal axis is the true labels. The shading and inscribed values represent the percentage of the time that a given label was predicted given a true label. For example, the 0.02 where `SPORTS` on the vertical axis intersects `COMEDY` on the horizontal axis means that `SPORTS` was predicted 2% of the time that the actual label was `COMEDY`.
+
+Ideally every label is properly predicted, which would result in a plot where the intersection of every label with itself was inscribed with a 1 (dark blue) and inscribed with a 0 (dark red) otherwise. We can see on this plot that this is not the case for most categories. We do however, notice that the model does tend to predict the correct label more often than not, evidenced by the fact that the values along the main diagonal in each column tend to be darker than the rest of the values in that column. 
+
+We can also use this plot to see which categories tend to be confused with others. For instance, we see that `POLITICS`, `ENTERTAINMENT` and `HEALTHY LIVING` are often false positives. For example, the true label `ARTS & CULTURES` is more likely predicted as `POLITICS` or `HEALTHY LIVING` than it is to be correctly classified. This can be explained through the contentwise closesness as well as the class imbalance. This is especially true for extreme cases such as `FIFTY`, which is very close in content to many categories but rarely appears in the training set, leading to nearly a 100% rate of miscategorization.
+
+```{r}
+# which classes are well classified (add top3?)
+# which classes are often confused for which ones?
+heatmap <- table(complete.test$category, pred_rf)
+heat <- data.frame(heatmap)
+heat <- heat %>% group_by(Var1) %>% mutate(pct = Freq/sum(Freq))
+```
+
+
+```{r conf1, fig.height=8, fig.width=14, fig.cap='Confusion Plot', include=T}
+ggplot(heat, aes(x = Var1, y = pred_rf, fill = pct)) + geom_tile() + scale_fill_gradient2(low = muted("darkred"), 
+                       mid = "white", 
+                       high = muted("midnightblue"), 
+                       midpoint = max(heat$pct)/2,
+                       space = "Lab",
+                       na.value = "grey50", 
+                       guide = "colourbar") +
+  theme(axis.text.x = element_text(angle=90, hjust = 1,vjust=1,size = 12,face = "bold"),
+        plot.title = element_text(size=20,face="bold"),
+        axis.text.y = element_text(size = 12,face = "bold")) + 
+  theme(legend.title=element_text(face="bold", size=14)) + 
+  scale_x_discrete(name="") +
+  scale_y_discrete(name="") +
+  labs(fill="Pct") + # background colours are mapped according to the value column
+  geom_text(aes(label = round(pct, 2))) + # write the values
+  xlab("True Category") + 
+  ylab("Predicted Category")
+
+# Healthy living is over classified -> explain: similar to many other topics and frequent!
+# check some misclassifications! business to health?
+```
+
+
+## Gradient boost
+
+*A. Model Formulation*
+
+Boosting is a very potent tool for error reduction in decision trees. The main difference compared to classical random forests is that boosting pools together many shallow decision trees (weak learners) instead of deep ones. These have low variance but high bias. In order to reduce the overall error, Boosting then tries to reduce the bias by sequentially adding new trees, that perform better in cases where the previous ones performed poorly. Gradient boosting specifically utilises the gradient of a loss function, e.g. log loss, to find the next tree to add. Boosting is especially advantageous in unbalanced scenarios, which is why we consider it for this project. We implemented a model using extreme gradient boosting from the `xgboost` package for its speed advantage and relatively high accuracy with large and complex data. We then crossvalidate the hyperparameters learning rate "eta", "maximum tree depths" (complexity of trees) and number of iterations/trees.
+
+*B. Results:*
+
+We achievend an accuracy of 47% We crossvalidated our model parameters with using `xgb.cv` with 10 folds and found the best results for a learning rate eta of 0.3, 100 iterations and maximum tree depths of 3. We use the multinomial log loss as a performance metric and `multi:softprob` for the output objective, providing the probability of each class.
+
+```{r}
+#xgboost: 
+train_label <- y_train_num
+test_label <- y_test_num
+valid_label <- y_valid_num
+train_matrix <- xgb.DMatrix(data = X, label = train_label)
+test_matrix <- xgb.DMatrix(data = X_test, label = test_label)
+valid_matrix <- xgb.DMatrix(data = X_valid, label = valid_label)
+
+# need to look into tuning
+
+numberOfClasses <- length(unique(complete.test$category))
+xgb_params <- list("objective" = "multi:softprob",
+                   "eval_metric" = "mlogloss",
+                   "num_class" = numberOfClasses)
+
+nround    <- 100 # number of XGBoost rounds
+cv.nfold  <- 10
+```
+
+
+```{r}
+# Cross validate:
+set.seed(2)
+# cv_model <- xgb.cv(params = xgb_params,
+#                    data = train_matrix,
+#                    nrounds = nround,
+#                    nfold = cv.nfold,
+#                    verbose = FALSE,
+#                    prediction = TRUE,
+#                    eta = 0.3, #better than 0.2 and 0.1
+#                    max_depths = 3)
+
+#if accuracy not good enough, fine tune with eta = 0.1, maybe subsample = 0.5
+#fit_xgb <- xgb.train(params = xgb_params, train_matrix, nrounds = 100, prediction = TRUE)
+#save(fit_xgb, file = "xgb.RData")
+load("xgb.RData")
+# prob_xgb <- predict(fit_xgb, newdata = X_test)
+# prob_xgb <- matrix(prob_xgb, nrow = numberOfClasses,
+#             ncol=length(prob_xgb)/numberOfClasses) %>% t() %>%
+#             data.frame() %>%
+#             mutate(label = test_label + 1,
+#             max_prob = max.col(., "last"))
+# 
+# pred_xgb <- as.factor(prob_xgb$max_prob)
+# levels(pred_xgb) <- levels(complete.test$category)
+# prob_xgb <- data.frame(prob_xgb[, -c(27, 28)])
+# colnames(prob_xgb) <- levels(complete.test$category)
+# 
+# rank_xgb <- bind_rows(apply(prob_xgb, 1, FUN = top3)) #top3 classes
+# top3_match_xgb <- rowCheck(complete.test$category, rank_xgb)
+mce_xgb <- mean(pred_xgb == complete.test$category) #47% accuracy
+mce_xgb_top3 <- mean(top3_match_xgb == TRUE) # 67% accuracy
+
+#save(fit_xgb, prob_xgb, pred_xgb, top3_match_xgb, file = "xgb.RData")
+
+# confusion matrix of test set
+confMat_xgb <- confusionMatrix(pred_xgb,
+                complete.test$category,
+                mode = "everything") #use this to show which classes are predicted well etc.
+
+```
+
+
+## Neural Networks
+
+*A. Model Formulation*
+
+We now train a neural net to compare to the random forest. Neural networks (NN's) were developed in the mid 1900's as an attempt to create a simple model of the human brain. They are structured as directed graphs, where nodes are referred to as 'neurons,' and edges are stored as the weight the parent's value has in determining the child's value. NN's are advantageous for several reasons. They are capable of learning complex, non-linear relationships in data, with very few assumptions needed to make this possible. In particular, there are no distributional assumptions, and the model allows for heteroskedasticity. 
+
+Neural nets are able to effectively learn very complex systems, but at the sake of interpretability. We decided to implement a neural network due to the fact that we hava a wide range of different predictors, from textmining as well as the meta information, on a relatively large data set. Neural networks provide relatively fast and accurate models in scenarios where we otherwise would have problems with feature selection due to memory constraints. For instance, the multinomial logistic regression takes significantly longer with much higher memory demands. We therefore trade the interpretability for better performance and speed.
+
+We have set up a neural network with 512 input neurons, 256 hidden neurons and 26 output neurons
+The input nodes use the ReLu function whereas the output one uses the softmax function. This means that the output gives us the probability if each possible category. We fine tune this model by introducing dropouts to improve the generalisability of the network. The dropout rate determines how many random neurons in each layer will be ignored. This is done to reduce the importance of specific neurons and thus help against overfitting. We expect an improvement in terms of test error from this. The dropout rate was eventually set to 0.2.
+
+*B. Results:*
+
+We found that the neural network with dropout provides the best accuracy yet at 49% percent. We provide a plot of the loss and accuracy of the neural net per epoch below.
+
+
+![](nn.png)
+
+```{r}
+# # Neural Network:
+# set.seed(2)
+# model <- keras_model_sequential() %>%
+# layer_dense(units = 512, activation = "relu", input_shape = c(p)) %>% # 1 layer with 16 neurons
+# layer_dense(units = 256, activation = "relu") %>% # layer 2 with 8 neurons
+# layer_dense(units = 26, activation = "softmax")
+# print(model)
+# 
+# model %>% compile(
+# optimizer = "adam",
+# loss = "sparse_categorical_crossentropy",
+# metrics = c("accuracy")
+# )
+# 
+# #with dropout
+# model2 <- keras_model_sequential() %>%
+# layer_dense(units = 512, activation = "relu", input_shape = c(p)) %>% # 1 layer with 16 neurons
+#   layer_dropout(0.2) %>%
+# layer_dense(units = 256, activation = "relu") %>% # layer 2 with 8 neurons
+#   layer_dropout(0.2) %>%
+# layer_dense(units = 26, activation = "softmax")
+# print(model)
+# 
+# model2 %>% compile(
+# optimizer = "adam",
+# loss = "sparse_categorical_crossentropy",
+# metrics = c("accuracy")
+# )
+```
+
+
+```{r}
+# set.seed(2)
+# fit_NN <- model %>% fit(
+# X,
+# y_train_num,
+# epochs = 5,
+# batch_size = 512,
+# validation_data = list(X_test, y_test_num)
+# )
+# plot(fit_NN) #max at 5 epochs with 48%
+# 
+# set.seed(2)
+# fit_NN2 <- model2 %>% fit(
+# X,
+# y_train_num,
+# epochs = 6,
+# batch_size = 512,
+# validation_data = list(X_test, y_test_num)
+# )
+# # plot(fit_NN2) #max at 6 epoch with 48%
+# save(model, model2, fit_NN, fit_NN2, file="neuralNetworks.RData")
+```
+
+
+```{r}
+# Accuracies, single vs multilable
+set.seed(2)
+load("neuralData.RData")
+# prob_NN <- model %>% predict(X_test)
+# colnames(prob_NN)<- levels(complete.test$category)
+# pred_NN <- colnames(prob_NN)[apply(prob_NN,1,which.max)]
+# rank_NN <- bind_rows(apply(prob_NN, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_match_NN <- rowCheck(complete.test$category, rank_NN)
+
+# mce_NN <- mean(pred_NN == complete.test$category) #40% accuracy
+# mce_NN_top3 <- mean(top3_match_NN == TRUE) # 60% accuracy
+
+#with dropout
+# prob_NN2 <- model2 %>% predict(X_test)
+# colnames(prob_NN2)<- levels(complete.test$category)
+# pred_NN2 <- colnames(prob_NN2)[apply(prob_NN2,1,which.max)]
+# rank_NN2 <- bind_rows(apply(prob_NN2, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_match_NN2 <- rowCheck(complete.test$category, rank_NN2)
+
+# mce_NN2 <- mean(pred_NN2 == complete.test$category) #48% accuracy
+# mce_NN_top32 <- mean(top3_match_NN2 == TRUE) # 69% accuracy
+
+#save(mce_NN, mce_NN_top3, mce_NN2, mce_NN_top32,  file="neuralData.RData")
+```
+
+## Multinomial Logistic Regression
+
+*A. Model Formulation*
+
+Lastly, we used regression mainly to check for biases regarding the meta-information in the presentation of news.
+We investigate the regression coefficients regarding the meta information such as day of publishing, average word length or word count to check for differences in the respective categories. We used a multinomial grouped LASSO to determine the variables of importance for most categories. We then created our model using the `multinom` function from the `nnet` package for its speed and performance advantages.
+
+*B. Results*
+
+Surprisingly, even meta-information alone achieves a test accuracy of around 20%.
+Regarding the differences in regession coefficients shown in Figure \@ref(fig:fig20).
+
+```{r}
+# Multinomial regression: Only for meta information
+# Bias, check how categories are influenced:
+
+ # set.seed(2)
+#fit_test <- multinom(category ~ weekdays + avg_headline + avg_desc + missing_author + missing_desc + word_count_desc + word_count_headline, complete.train)
+#save(fit_test, file = "multinomial.RData")
+load("multinomial.RData")
+# weekdays show how much each category is associated with each category
+
+# set.seed(2)
+#Grouped LASSO:
+#load("cvfit.RData")
+#cvfit <- cv.glmnet(X, y_train, family="multinomial", type.multinomial = "grouped", nfolds = 10, alpha = .99)
+#save(cvfit, file = "cvfit.RData")
+# 
+# beta.lasso <- coef(cvfit, s="lambda.1se") # output lasso estimates
+# beta <- beta.lasso[which(beta.lasso !=0),] # non zero beta's
+# beta <- as.matrix(beta);
+# beta <- rownames(beta)
+# beta
+
+load("mlrData.RData")
+# prob_mlr <- predict(fit_test, complete.test[, 2:8], type = "prob")
+# pred_mlr     <- colnames(prob_mlr)[apply(prob_mlr, 1, which.max)] # most likely class!
+# rank_mlr     <- bind_rows(apply(prob_mlr, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_match_mlr  <- rowCheck(complete.valid$category, rank_mlr)
+
+# mce_mlr     <- mean(pred_mlr == complete.test$category) #46% accuracy
+# mce_mlr_top3 <- mean(top3_match_mlr == TRUE) # 66% accuracy
+#save(mce_mlr, mce_mlr_top3, file="mlrData.RData")
+```
+
+```{r}
+coef_mn <- as.data.frame(coef(fit_test)) %>% mutate(category = rownames(coef(fit_test))) %>% gather("predictor", "value", -category)
+
+```
+
+```{r fig20, fig.height=8, fig.width=14, include=T}
+
+ggplot(coef_mn, aes(x = category, y = predictor, fill = value)) + geom_tile() + scale_fill_gradient2(low = muted("darkred"), 
+                       mid = "white", 
+                       high = muted("midnightblue"), 
+                       midpoint = mean(coef_mn$value),
+                       space = "Lab",
+                       na.value = "grey50", 
+                       guide = "colourbar") +
+  theme(axis.text.x = element_text(angle=90, hjust = 1,vjust=1,size = 12,face = "bold"),
+        plot.title = element_text(size=20,face="bold"),
+        axis.text.y = element_text(size = 12,face = "bold")) + 
+  ggtitle("Association Plot") + 
+  theme(legend.title=element_text(face="bold", size=14)) + 
+  scale_x_discrete(name="") +
+  scale_y_discrete(name="") +
+  labs(fill="Corr. Coef.") + # background colours are mapped according to the value column
+  geom_text(aes(label = round(value, 2))) # write the values
+
+```
+
+The association plot shows the regression coefficients for each category and predictor. We use this to spot irregulary strong associations between predictors and categories. For instance, the plot shows a highly negative coefficient of "Home & Living" and missing description. This means that this category is strongly associated with a description. At the same time "Religion" is strong associated with a missing description. This could be caused by sensitive topics not having a short catchy description, where as topics about home, marriage, etc are often featuring companies and organisations in talk about a light hearted topic. We can also see differences regarding missing author names for categories such as `CRIME`, `ENVIRONMENT` and `WORLD NEWS` vs. `EDUCATION` and `IMPACT`. With the former ones having a strongly positive association and the latter ones a strongly negative, meaning that for instance articles about "Crimes" are more likely to not feature the authors name while articles about "Education" are more likely to feature the authors name. This might also be explained by some topics being of very sensitive nature and thus making journalists to opt not to publish their names while other articles might provide desired publicity.
+
+## Model Comparison
+
+We found the best performing model with some margin to be the neural network with a dropout rate of 0.2 and gradient boosted random forest with a learning rate of 0.3. Interestingly, catgories such as `MARRIAGE`  where especially affected by this and significantly better predicted by neural networks and gradient boosted random forests. 
+
+```{r}
+# Validation error: -> comparison of all models
+#compare accuracy and confusion matrix
+
+load("valData.Rdata")
+
+# #RF:
+# prob_val_rf         <- predict(fit.rf.ranger, complete.valid[, -1], type = "response")$predictions
+# pred_val_rf         <- colnames(prob_val_rf)[apply(prob_val_rf, 1, which.max)] # most likely class!
+# rank_val_rf         <- bind_rows(apply(prob_val_rf, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_val_match_rf   <- rowCheck(complete.valid$category, rank_val_rf)
+# 
+# mce_val_rf      <- mean(pred_val_rf == complete.valid$category) #46% accuracy
+# mce_val_rf_top3 <- mean(top3_val_match_rf == TRUE) # 66% accuracy
+# 
+# #XGB:
+# prob_val_xgb <- predict(fit_xgb, X_valid, type = "response")
+# prob_val_xgb <- matrix(prob_val_xgb, nrow = numberOfClasses,
+#             ncol=length(prob_val_xgb)/numberOfClasses) %>% t() %>%
+#             data.frame() %>%
+#             mutate(label = valid_label + 1,
+#             max_prob = max.col(., "last"))
+# pred_val_xgb <- as.factor(prob_val_xgb$max_prob)
+# levels(pred_val_xgb) <- levels(complete.valid$category)
+# prob_val_xgb <- data.frame(prob_val_xgb[, -c(27, 28)])
+# colnames(prob_val_xgb) <- levels(complete.valid$category)
+# rank_val_xgb <- bind_rows(apply(prob_val_xgb, 1, FUN = top3)) #top3 classes
+# top3_match_val_xgb <- rowCheck(complete.valid$category, rank_val_xgb)
+# 
+# mce_val_xgb <- mean(pred_val_xgb == complete.valid$category) #47% accuracy
+# mce_val_xgb_top3 <- mean(top3_match_val_xgb == TRUE) # 67% accuracy
+# 
+# #NN, WHY SO LOW????
+# prob_val_NN  <- model2 %>% predict(X_valid)
+# colnames(prob_val_NN)<- levels(complete.valid$category)
+# pred_val_NN <- colnames(prob_val_NN)[apply(prob_val_NN,1,which.max)]
+# rank_val_NN <- bind_rows(apply(prob_val_NN, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_match_val_NN <- rowCheck(complete.valid$category, rank_val_NN)
+# 
+# mce_val_NN <- mean(pred_val_NN == complete.valid$category) #48% accuracy
+# mce_val_NN_top3 <- mean(top3_match_val_NN == TRUE) # 69% accuracy
+# 
+# prob_val_mlr     <- predict(fit_test, complete.valid[, 2:8], type = "prob")
+# pred_val_mlr     <- colnames(prob_val_mlr)[apply(prob_val_mlr, 1, which.max)] # most likely class!
+# rank_val_mlr     <- bind_rows(apply(prob_val_mlr, 1, FUN = top3), .id = "column_label") #top3 classes
+# top3_val_match_mlr  <- rowCheck(complete.valid$category, rank_val_mlr)
+# 
+# mce_val_mlr     <- mean(pred_val_mlr == complete.valid$category) #20% accuracy
+# mce_val_mlr_top3 <- mean(top3_val_match_mlr == TRUE) # 40% accuracy
+
+# confMat_xgb <- confusionMatrix(pred_val_xgb,
+#                 complete.valid$category,
+#                 mode = "everything") #use this to show which classes are predicted well etc.
+
+#save(mce_val_rf, mce_val_rf_top3, mce_val_xgb, mce_val_xgb_top3, mce_val_NN, mce_val_NN_top3, mce_val_rf, mce_val_rf_top3, confMat_xgb, file = "valData.Rdata")
+```
+
+
+# Conclusion
+
+We constructed a model that is accurate in classifying online articles based on their headlines with a testing accuracy of nearly 50%. This is 34% better than the baseline classifier. We now discuss limitations and future directions. We also notice that often the model finds two or three categories to have nearly identical likelihoods, but then drops off sharply. We often find that these categories tend to be very similar (e.g. `FOOD AND DRINK`, `HEALTHY LIVING`, and `HOME & LIVING`). For this reason, we also look to see if the true label is in one of the top three predicted categories. Using this notion of accuracy, our model predicts correctly with up to 70% accuracy.
+
+## Limitations
+
+There are several limitations to our experiment. For example, we do not have access to information regarding the demographics of the individuals reading the articles in our data. This would be extremely useful in extending beyond classification in our study into analysis of how media consumption varies within groups. We also notice that in the original data, several categories were very similar to each other, and we found no formalization of these categories on HuffPost's website. For this reason, we are led to believe that this data was amateurly labeled and hence the accuracy of the model is restricted to the biases and opinions of the individual(s) who labeled the data. We also do not have information on the sway of political articles in this dataset, which would allow us to analyze for bias as well.
+
+Regarding the model creation, we only used computational less intensive tuning of our hyperparameters. With a more extensive approach to tune hyperparameters we could improve predicting power even more. Especially the regression approach could benefit from this, by including more predictors before running a thorough feature selection process.
+
+## Future Work
+
+In the future, we would like to see these formulations applied to a broader dataset, involving longitudinal data with demographic information on articles read by individuals over time. This would allow us to see trends in how individuals consume data, such as whether they believe they consume data in a more uniform way than they do. We also would be interested in looking at trends over subpopulations. For example, how does the distribution over categories differ between the Southeast and Northwest?
+
+Lastly, we would like to see similar techniques applied to articles labeled for political bias also. With this data, we could look at relationships between bias and consumption. This would be especially important at the times of elections, as it would allow us to look for changes in media consumption and bias in the most politically important and volatile times. 
+
+# References
